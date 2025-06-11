@@ -1,0 +1,91 @@
+public with sharing class MetadataAIAnalyzerDirect {
+
+    public class OpenAIRequest {
+        public String model = 'gpt-4';
+        public List<Message> messages = new List<Message>();
+    }
+
+    public class Message {
+        public String role;
+        public String content;
+    }
+
+    public class OpenAIResponse {
+        public List<Choice> choices;
+    }
+
+    public class Choice {
+        public Message message;
+    }
+
+    public static void analyzeMetadata() {
+        List<Metadata_Snapshot__c> snapshots = [
+            SELECT Id, Component_Name__c, Component_Type__c, Last_Modified_Date__c, Last_Modified_By__c, AI_Processed__c 
+            FROM Metadata_Snapshot__c 
+            WHERE AI_Processed__c = false
+            LIMIT 3
+        ];
+
+        // Load API key from metadata
+        String apiKey = '';
+        List<OpenAI_Config__mdt> configList = [SELECT API_Key__c FROM OpenAI_Config__mdt WHERE DeveloperName = 'Default' LIMIT 1];
+        if (!configList.isEmpty()) {
+            apiKey = ''; //<<---- Add your api key here
+        }
+
+        for (Metadata_Snapshot__c snapshot : snapshots) {
+            try {
+                String prompt = 'Analyze the following Salesforce metadata and assign a risk score (0–10) with a summary of potential issues:\n' +
+                    'Component Name: ' + snapshot.Component_Name__c + '\n' +
+                    'Component Type: ' + snapshot.Component_Type__c + '\n' +
+                    'Last Modified By: ' + snapshot.Last_Modified_By__c + '\n' +
+                    'Last Modified Date: ' + snapshot.Last_Modified_Date__c.format();
+
+                OpenAIRequest reqBody = new OpenAIRequest();
+
+                Message systemMsg = new Message();
+                systemMsg.role = 'system';
+                systemMsg.content = 'You are a Salesforce metadata auditor AI. Be brief but insightful.';
+                reqBody.messages.add(systemMsg);
+
+                Message userMsg = new Message();
+                userMsg.role = 'user';
+                userMsg.content = prompt;
+                reqBody.messages.add(userMsg);
+
+                HttpRequest req = new HttpRequest();
+                req.setEndpoint('https://api.openai.com/v1/chat/completions');
+                req.setMethod('POST');
+                req.setHeader('Content-Type', 'application/json');
+                req.setHeader('Authorization', 'Bearer ' + apiKey);
+                req.setBody(JSON.serialize(reqBody));
+
+                Http http = new Http();
+                HttpResponse res = http.send(req);
+
+                if (res.getStatusCode() == 200) {
+                    OpenAIResponse aiRes = (OpenAIResponse) JSON.deserialize(res.getBody(), OpenAIResponse.class);
+                    String content = aiRes.choices[0].message.content;
+
+                    Decimal riskScore = 0;
+                    Matcher m = Pattern.compile('(\\d+(\\.\\d+)?)').matcher(content);
+                    if (m.find()) {
+                        riskScore = Decimal.valueOf(m.group(1));
+                    }
+
+                    snapshot.AI_Summary__c = content;
+                    snapshot.Risk_Score__c = riskScore;
+                } else {
+                    snapshot.AI_Summary__c = 'API Error: ' + res.getStatusCode();
+                }
+
+                snapshot.AI_Processed__c = true;
+            } catch (Exception e) {
+                snapshot.AI_Summary__c = 'Exception: ' + e.getMessage();
+                snapshot.AI_Processed__c = true;
+            }
+        }
+
+        update snapshots;
+    }
+}
